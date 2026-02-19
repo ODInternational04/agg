@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Depot Workflow Mockup</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Depot Workflow</h1>
+    <p>Static demo — mobile-friendly. Simulated QR via inputs.</p>
+  </header>
+
+  <main>
+    <!-- Home Screen -->
+    <section id="home" class="tab active">
+      <div class="home-actions">
+        <button class="big-btn" id="goReceive">Receive</button>
+        <button class="big-btn" id="goStore">Store</button>
+      </div>
+    </section>
+
+    <!-- Receive Screen -->
+    <section id="receive" class="tab">
+      <h2>Inbound Receipt</h2>
+      <button class="link-btn" id="backHome1">← Back to Home</button>
+
+      <div class="card">
+        <h3>Scan Bin</h3>
+        <p>Enter a Bin QR (e.g., BIN-1001) or open camera to scan.</p>
+        <div class="scan-row">
+          <input id="receiveBinQr" placeholder="Scan/enter Bin QR" />
+          <button id="receiveOpenScannerBtn" class="primary">Open Scanner</button>
+        </div>
+        <div id="receiveBinInfo" class="info"></div>
+      </div>
+
+      <div class="card">
+        <h3>Capture Details</h3>
+        <div class="grid-2">
+          <label>Inbound litres
+            <input id="receiveLitres" type="number" min="0" step="0.1" />
+          </label>
+          <label>Oil type
+            <select id="receiveOilType">
+              <option value="UCO">UCO</option>
+              <option value="WINTERIZED">Winterized</option>
+              <option value="ACID_OIL">Acid Oil</option>
+              <option value="GUM_OIL">Gum Oil</option>
+              <option value="MIXED_OIL">Mixed Oil</option>
+            </select>
+          </label>
+        </div>
+        <label>Condition notes
+          <input id="receiveNotes" placeholder="Optional notes" />
+        </label>
+        <label>Photo (optional)
+          <input id="receivePhoto" type="file" accept="image/*" />
+        </label>
+        <div class="actions">
+          <button id="receiveConfirmBtn" class="primary">Confirm Receipt</button>
+          <button id="goToStoreBtn" class="primary" style="display: none; margin-top: 10px;">Go to Store →</button>
+        </div>
+        <div id="receiveMessage" class="message"></div>
+      </div>
+    </section>
+
+    <!-- Store Screen -->
+    <section id="store" class="tab">
+      <h2>Storage Assignment</h2>
+      <button class="link-btn" id="backHome2">← Back to Home</button>
+      
+      <div class="card">
+        <h3>Bins Ready for Storage</h3>
+        <p>Select a bin and scan storage location QR to assign.</p>
+        <div id="storeBinList" class="bin-list"></div>
+      </div>
+      
+      <div id="storeMessage" class="message"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Connected to Supabase database. Real-time data sync.</p>
+  </footer>
+  <!-- Supabase Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- QR scanning library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- Configuration -->
+  <script src="supabase-config.js"></script>
+  <!-- Application -->
+  <script src="app.js"></script>
+
+  <!-- Scanner Modal -->
+  <div id="scannerModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Scan Bin QR</h3>
+        <button id="scannerClose" class="close-btn">Close</button>
+      </div>
+      <div id="qrReader" class="qr-reader"></div>
+      <div id="scannerMessage" class="message"></div>
+      <div class="card">
+        <label>Select camera
+          <select id="cameraSelect"></select>
+        </label>
+        <div class="actions">
+          <button id="cameraApplyBtn" class="primary">Use Camera</button>
+        </div>
+      </div>
+      <div class="card">
+        <label>Scan from image (fallback)
+          <input id="qrImageFile" type="file" accept="image/*" />
+        </label>
+        <div class="actions">
+          <button id="scanImageBtn" class="primary">Scan Image</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

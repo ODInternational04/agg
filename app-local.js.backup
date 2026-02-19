@@ -1,0 +1,555 @@
+// Depot Workflow Mockup (Static Data)
+// No backend; simulated scans and state transitions per spec.
+
+(function() {
+  const USER = { id: 'USER-DEPOT-MANAGER-001', name: 'Depot Manager' };
+  const DEPOT = { id: 'DEPOT-A', name: 'Depot A' };
+
+  const STATUSES = {
+    IN_FIELD: 'IN_FIELD',
+    IN_TRANSIT: 'IN_TRANSIT',
+    RECEIVED_AT_DEPOT: 'RECEIVED_AT_DEPOT',
+    STORED: 'STORED',
+    DISPATCHED: 'DISPATCHED',
+    CLOSED: 'CLOSED',
+  };
+
+  const aggregators = [
+    { id: 'AGG-001', name: 'Aggregator A' },
+    { id: 'AGG-002', name: 'Aggregator B' },
+  ];
+
+  const bins = [
+    { id: 'BIN-1001', aggregatorId: 'AGG-001', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+    { id: 'BIN-1002', aggregatorId: 'AGG-001', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+    { id: 'BIN-2001', aggregatorId: 'AGG-002', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+    { id: 'BIN-3001', aggregatorId: null, status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null }, // unassigned but valid
+  ];
+
+  const locations = [
+    { id: 'LOC-DEPOT-A-BAY-1', name: 'Depot A • Bay 1', type: 'AGGREGATOR_BAY', active: true, allowedOilTypes: ['UCO','WINTERIZED','ACID_OIL','GUM_OIL','MIXED_OIL'], capacity: 2, current: [] },
+    { id: 'LOC-DEPOT-A-BAY-3-RACK-2', name: 'Depot A • Bay 3 • Rack 2', type: 'RACK_SLOT', active: true, allowedOilTypes: ['UCO','WINTERIZED','ACID_OIL'], capacity: 3, current: [] },
+  ];
+
+  const events = [];
+
+  // ----- LocalStorage Helpers -----
+  function loadBinsFromStorage() {
+    try {
+      const stored = localStorage.getItem('depot_bins');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        // Merge stored bins with default bins
+        parsed.forEach(storedBin => {
+          const existing = bins.find(b => b.id === storedBin.id);
+          if (existing) {
+            Object.assign(existing, storedBin);
+          } else {
+            bins.push(storedBin);
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Error loading bins from storage:', e);
+    }
+  }
+
+  function saveBinsToStorage() {
+    try {
+      localStorage.setItem('depot_bins', JSON.stringify(bins));
+    } catch (e) {
+      console.error('Error saving bins to storage:', e);
+    }
+  }
+
+  function loadEventsFromStorage() {
+    try {
+      const stored = localStorage.getItem('depot_events');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        events.push(...parsed);
+      }
+    } catch (e) {
+      console.error('Error loading events from storage:', e);
+    }
+  }
+
+  function saveEventsToStorage() {
+    try {
+      localStorage.setItem('depot_events', JSON.stringify(events));
+    } catch (e) {
+      console.error('Error saving events to storage:', e);
+    }
+  }
+
+  function nowTs() { return new Date().toISOString(); }
+  function findBin(id) { return bins.find(b => b.id === id); }
+  function findLoc(id) { return locations.find(l => l.id === id); }
+  function logEvent(evt) { 
+    events.push({ ...evt }); 
+    saveEventsToStorage();
+  }
+
+  function setMessage(el, text, type) {
+    el.className = 'message' + (type ? ' ' + type : '');
+    el.textContent = text || '';
+  }
+
+  function renderKV(el, obj) {
+    if (!obj) { el.innerHTML = ''; return; }
+    const rows = Object.entries(obj).map(([k,v]) => `
+      <div class="kv">
+        <div><strong>${k}</strong></div>
+        <div>${v == null ? '' : v}</div>
+      </div>`).join('');
+    el.innerHTML = rows;
+  }
+
+  function renderEventLog() {
+    // Event log UI removed for simplicity; keep data for future use.
+  }
+
+  // ----- Simple Navigation -----
+  function showTab(id) {
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach(t => t.classList.toggle('active', t.id === id));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ----- QR Scanner (html5-qrcode) -----
+  let qrInstance = null;
+  let scannerOpen = false;
+  let scannerOnScan = null;
+  let camerasCache = [];
+  async function startCamera(cameraId) {
+    const readerEl = document.getElementById('qrReader');
+    const msgEl = document.getElementById('scannerMessage');
+    if (!window.Html5Qrcode) { setMessage(msgEl, 'QR library not loaded', 'error'); return; }
+    if (!qrInstance) qrInstance = new Html5Qrcode('qrReader');
+    
+    // Ensure we have a valid camera ID or fallback
+    let cameraConfig = cameraId;
+    if (!cameraConfig || cameraConfig === 'environment') {
+      cameraConfig = { facingMode: 'environment' };
+    }
+    
+    try {
+      // Stop any running instance first
+      try { await qrInstance.stop(); await qrInstance.clear(); } catch {}
+      const config = { fps: 10, qrbox: { width: Math.min(280, readerEl.clientWidth - 24), height: 200 } };
+      await qrInstance.start(cameraConfig, config, (decodedText) => {
+        if (!scannerOpen) return;
+        try { if (scannerOnScan) scannerOnScan(decodedText); } catch {}
+        closeScanner();
+      });
+      setMessage(msgEl, 'Camera ready. Point at a QR.', 'success');
+    } catch (err) {
+      setMessage(msgEl, 'Could not start camera: ' + (err?.message || err) + '. Try image fallback below.', 'error');
+    }
+  }
+  function openScanner(onScan) {
+    const modal = document.getElementById('scannerModal');
+    const readerEl = document.getElementById('qrReader');
+    const msgEl = document.getElementById('scannerMessage');
+    if (!window.Html5Qrcode) {
+      setMessage(msgEl, 'QR library not loaded', 'error');
+      return;
+    }
+    modal.classList.add('show');
+    scannerOpen = true;
+    scannerOnScan = onScan;
+    setMessage(msgEl, 'Initializing camera…');
+    try {
+      Html5Qrcode.getCameras().then(cameras => {
+        camerasCache = cameras || [];
+        const cameraSelect = document.getElementById('cameraSelect');
+        
+        // Always include a default option
+        const cameraOptions = camerasCache.length 
+          ? camerasCache 
+          : [{ id: 'environment', label: 'Default Camera (rear-facing)' }];
+        
+        if (cameraSelect) {
+          cameraSelect.innerHTML = cameraOptions
+            .map(c => `<option value="${c.id}">${c.label || c.id}</option>`).join('');
+        }
+        
+        // Try to start with first camera or fallback
+        const initialCamera = camerasCache.length > 0 ? camerasCache[0].id : 'environment';
+        startCamera(initialCamera);
+      }).catch(err => {
+        // Even if getCameras fails, try with default config
+        const cameraSelect = document.getElementById('cameraSelect');
+        if (cameraSelect) {
+          cameraSelect.innerHTML = '<option value="environment">Default Camera (rear-facing)</option>';
+        }
+        setMessage(msgEl, 'Trying default camera...', '');
+        startCamera('environment');
+      });
+    } catch (e) {
+      setMessage(msgEl, 'Scanner init error: ' + (e?.message || e), 'error');
+    }
+  }
+
+  function closeScanner() {
+    const modal = document.getElementById('scannerModal');
+    const msgEl = document.getElementById('scannerMessage');
+    scannerOpen = false;
+    if (qrInstance) {
+      try { 
+        qrInstance.stop().then(() => {
+          if (qrInstance && qrInstance.clear) {
+            qrInstance.clear();
+          }
+        }).catch(() => {}); 
+      } catch {}
+      qrInstance = null;
+    }
+    modal.classList.remove('show');
+    setMessage(msgEl, '', '');
+  }
+
+  // ----- Receive Screen -----
+  function setupReceive() {
+    const receiveBinQr = document.getElementById('receiveBinQr');
+    const receiveOpenScannerBtn = document.getElementById('receiveOpenScannerBtn');
+    const receiveBinInfo = document.getElementById('receiveBinInfo');
+    const litresEl = document.getElementById('receiveLitres');
+    const oilTypeEl = document.getElementById('receiveOilType');
+    const notesEl = document.getElementById('receiveNotes');
+    const photoEl = document.getElementById('receivePhoto');
+    const confirmBtn = document.getElementById('receiveConfirmBtn');
+    const goToStoreBtn = document.getElementById('goToStoreBtn');
+    const msgEl = document.getElementById('receiveMessage');
+
+    let resolvedBin = null;
+
+    // Function to resolve bin
+    function resolveBin(qr) {
+      let bin = findBin(qr);
+      
+      // If bin not found, create a new one
+      if (!bin) {
+        bin = {
+          id: qr,
+          aggregatorId: null,
+          status: STATUSES.IN_FIELD,
+          lastEventTs: null,
+          storedAt: null,
+        };
+        bins.push(bin);
+        saveBinsToStorage();
+        setMessage(msgEl, '✨ New bin ' + qr + ' created and ready for receipt', 'success');
+      } else if (bin.status === STATUSES.RECEIVED_AT_DEPOT || bin.status === STATUSES.STORED) {
+        setMessage(msgEl, 'Bin already received or stored', 'error');
+        renderKV(receiveBinInfo, {
+          'Bin ID': bin.id,
+          'Current Status': bin.status,
+          'Assigned Aggregator': bin.aggregatorId || 'Unassigned',
+        });
+        resolvedBin = bin;
+        return false;
+      } else {
+        setMessage(msgEl, 'Bin ready for receipt', 'success');
+      }
+      
+      resolvedBin = bin;
+      renderKV(receiveBinInfo, {
+        'Bin ID': bin.id,
+        'Current Status': bin.status,
+        'Assigned Aggregator': bin.aggregatorId || 'Unassigned',
+      });
+      return true;
+    }
+
+    if (receiveOpenScannerBtn) {
+      receiveOpenScannerBtn.addEventListener('click', () => {
+        openScanner((decodedText) => {
+          receiveBinQr.value = decodedText;
+          resolveBin(decodedText);
+        });
+      });
+    }
+
+    if (confirmBtn) {
+      confirmBtn.addEventListener('click', () => {
+        const qr = (receiveBinQr.value || '').trim();
+        if (!qr) { setMessage(msgEl, 'Please enter or scan a Bin QR', 'error'); return; }
+        
+        // Resolve bin if not already resolved or if QR changed
+        if (!resolvedBin || resolvedBin.id !== qr) {
+          if (!resolveBin(qr)) return;
+        }
+        
+        if (!resolvedBin) { setMessage(msgEl, 'Please resolve a bin first', 'error'); return; }
+        if (resolvedBin.status === STATUSES.RECEIVED_AT_DEPOT || resolvedBin.status === STATUSES.STORED) {
+          setMessage(msgEl, 'Bin already received or stored', 'error'); return;
+        }
+
+        let photoName = '';
+        if (photoEl && photoEl.files && photoEl.files[0]) {
+          photoName = photoEl.files[0].name;
+        }
+
+        const evt = {
+          type: 'RECEIVED',
+          binId: resolvedBin.id,
+          depotId: DEPOT.id,
+          aggregatorId: resolvedBin.aggregatorId,
+          timestamp: nowTs(),
+          meta: {
+            litres: litresEl && litresEl.value ? Number(litresEl.value) : null,
+            oilType: oilTypeEl && oilTypeEl.value ? oilTypeEl.value : null,
+            notes: notesEl && (notesEl.value || '').trim() ? (notesEl.value || '').trim() : null,
+            photo: photoName || null,
+            userId: USER.id,
+          }
+        };
+        logEvent(evt);
+        resolvedBin.status = STATUSES.RECEIVED_AT_DEPOT;
+        resolvedBin.lastEventTs = evt.timestamp;
+        saveBinsToStorage();
+
+        setMessage(msgEl, `✅ Receipt confirmed! Bin ${resolvedBin.id} received at ${DEPOT.name}`, 'success');
+        renderKV(receiveBinInfo, {
+          'Bin ID': resolvedBin.id,
+          'New Status': resolvedBin.status,
+          'Aggregator': resolvedBin.aggregatorId || 'Unassigned',
+          'Litres': evt.meta.litres ?? '—',
+          'Oil Type': evt.meta.oilType ?? '—',
+          'Notes': evt.meta.notes ?? '—',
+          'Photo': evt.meta.photo ?? '—',
+        });
+        
+        // Show the "Go to Store" button
+        if (goToStoreBtn) goToStoreBtn.style.display = 'block';
+        
+        // Clear form for next entry
+        setTimeout(() => {
+          if (receiveBinQr) receiveBinQr.value = '';
+          if (litresEl) litresEl.value = '';
+          if (notesEl) notesEl.value = '';
+          if (photoEl) photoEl.value = '';
+          resolvedBin = null;
+          renderKV(receiveBinInfo, null);
+        }, 2000);
+      });
+    }
+  }
+
+  // ----- Store Screen -----
+  let storeBinListEl = null;
+  let storeMsgEl = null;
+  
+  function renderBinList() {
+    if (!storeBinListEl) return;
+    
+    // Get all bins that are RECEIVED_AT_DEPOT (ready for storage)
+    const receivedBins = bins.filter(b => b.status === STATUSES.RECEIVED_AT_DEPOT);
+    
+    if (receivedBins.length === 0) {
+      storeBinListEl.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No bins ready for storage. Receive bins first.</p>';
+      return;
+    }
+
+    storeBinListEl.innerHTML = receivedBins.map(bin => {
+      // Get the last RECEIVED event to show details
+      const lastReceived = [...events].reverse().find(e => e.type === 'RECEIVED' && e.binId === bin.id);
+      const aggregator = bin.aggregatorId ? findAgg(bin.aggregatorId) : null;
+      const litres = lastReceived?.meta?.litres ?? '—';
+      const oilType = lastReceived?.meta?.oilType ?? '—';
+      
+      return `
+        <div class="bin-item">
+          <div class="bin-item-header">
+            <h4>${bin.id}</h4>
+          </div>
+          <div class="bin-item-details">
+            <div><strong>Branch:</strong> ${aggregator ? aggregator.name : 'Unassigned'}</div>
+            <div><strong>Inbound Litres:</strong> ${litres}</div>
+            <div><strong>Oil Type:</strong> ${oilType}</div>
+          </div>
+          <div style="margin-top: 10px;">
+            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Amount after drainage (litres)</label>
+            <input 
+              type="number" 
+              id="drainage-${bin.id}" 
+              data-bin-id="${bin.id}"
+              placeholder="Enter litres after drainage" 
+              min="0" 
+              step="0.1"
+              style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px;"
+            />
+          </div>
+          <div style="margin-top: 10px;">
+            <button class="primary" data-bin-id="${bin.id}" style="width: 100%;">Store</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Wire up Store buttons
+    storeBinListEl.querySelectorAll('button[data-bin-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const binId = btn.getAttribute('data-bin-id');
+        const bin = findBin(binId);
+        if (!bin) return;
+        
+        // Get the drainage amount input
+        const drainageInput = document.getElementById(`drainage-${binId}`);
+        const drainageAmount = drainageInput ? drainageInput.value : '';
+        
+        if (!drainageAmount || drainageAmount.trim() === '') {
+          setMessage(storeMsgEl, 'Please enter amount after drainage', 'error');
+          if (drainageInput) drainageInput.focus();
+          return;
+        }
+        
+        const drainageLitres = Number(drainageAmount);
+        if (isNaN(drainageLitres) || drainageLitres < 0) {
+          setMessage(storeMsgEl, 'Please enter a valid amount', 'error');
+          if (drainageInput) drainageInput.focus();
+          return;
+        }
+        
+        // Open scanner to scan storage location
+        setMessage(storeMsgEl, 'Scan storage location QR...', '');
+        openScanner((decodedText) => {
+          if (!decodedText || !decodedText.trim()) {
+            setMessage(storeMsgEl, 'Invalid storage location QR', 'error');
+            return;
+          }
+
+          // Store the bin (mockup - accept any QR)
+          const locationQR = decodedText.trim();
+          const evt = {
+            type: 'STORED',
+            binId: bin.id,
+            depotId: DEPOT.id,
+            aggregatorId: bin.aggregatorId,
+            locationId: locationQR,
+            timestamp: nowTs(),
+            meta: { 
+              userId: USER.id,
+              drainageLitres: drainageLitres
+            }
+          };
+          logEvent(evt);
+          bin.status = STATUSES.STORED;
+          bin.lastEventTs = evt.timestamp;
+          bin.storedAt = locationQR;
+          saveBinsToStorage();
+
+          setMessage(storeMsgEl, `✅ Oil has been stored successfully`, 'success');
+          renderBinList(); // Refresh the list
+        });
+      });
+    });
+  }
+  
+  function setupStore() {
+    storeBinListEl = document.getElementById('storeBinList');
+    storeMsgEl = document.getElementById('storeMessage');
+    renderBinList();
+  }
+
+  // ----- Lookup Screen -----
+  function setupLookup() {
+    const binQrEl = document.getElementById('lookupBinQr');
+    const lookupBtn = document.getElementById('lookupBtn');
+    const infoEl = document.getElementById('lookupInfo');
+
+    lookupBtn.addEventListener('click', () => {
+      const qr = (binQrEl.value || '').trim();
+      const bin = findBin(qr);
+      if (!bin) { infoEl.innerHTML = '<span class="message error">Bin QR not recognized</span>'; return; }
+      const lastEvt = [...events].reverse().find(e => e.binId === bin.id);
+      const loc = bin.storedAt ? findLoc(bin.storedAt) : null;
+      renderKV(infoEl, {
+        'Bin ID': bin.id,
+        'Status': bin.status,
+        'Last Event': lastEvt ? `${lastEvt.type} @ ${lastEvt.timestamp}` : '—',
+        'Location': loc ? `${loc.name} (${loc.id})` : '—',
+        'Aggregator': bin.aggregatorId || 'Unassigned',
+      });
+    });
+  }
+
+  // ----- Bootstrap -----
+  function bootstrap() {
+    // Clear localStorage on page load for fresh start
+    localStorage.removeItem('depot_bins');
+    localStorage.removeItem('depot_events');
+    
+    // Reset bins to default state
+    bins.length = 0;
+    bins.push(
+      { id: 'BIN-1001', aggregatorId: 'AGG-001', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+      { id: 'BIN-1002', aggregatorId: 'AGG-001', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+      { id: 'BIN-2001', aggregatorId: 'AGG-002', status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null },
+      { id: 'BIN-3001', aggregatorId: null, status: STATUSES.IN_FIELD, lastEventTs: null, storedAt: null }
+    );
+    
+    // Clear events
+    events.length = 0;
+    
+    // Home navigation
+    const goReceive = document.getElementById('goReceive');
+    const goStore = document.getElementById('goStore');
+    const goToStoreBtn = document.getElementById('goToStoreBtn');
+    const backHome1 = document.getElementById('backHome1');
+    const backHome2 = document.getElementById('backHome2');
+    if (goReceive) goReceive.addEventListener('click', () => showTab('receive'));
+    if (goStore) goStore.addEventListener('click', () => {
+      showTab('store');
+      renderBinList(); // Refresh bin list when navigating to Store
+    });
+    if (goToStoreBtn) goToStoreBtn.addEventListener('click', () => {
+      showTab('store');
+      renderBinList(); // Refresh bin list when navigating to Store
+    });
+    if (backHome1) backHome1.addEventListener('click', () => showTab('home'));
+    if (backHome2) backHome2.addEventListener('click', () => showTab('home'));
+
+    const scannerClose = document.getElementById('scannerClose');
+    if (scannerClose) scannerClose.addEventListener('click', closeScanner);
+
+    // Image scan fallback
+    const scanImageBtn = document.getElementById('scanImageBtn');
+    const qrImageFile = document.getElementById('qrImageFile');
+    const scannerMsg = document.getElementById('scannerMessage');
+    if (scanImageBtn) {
+      scanImageBtn.addEventListener('click', async () => {
+        if (!window.Html5Qrcode) { setMessage(scannerMsg, 'QR library not loaded', 'error'); return; }
+        const file = qrImageFile && qrImageFile.files && qrImageFile.files[0];
+        if (!file) { setMessage(scannerMsg, 'Select an image containing a QR code', 'error'); return; }
+        try {
+          if (!qrInstance) qrInstance = new Html5Qrcode('qrReader');
+          const decodedText = await qrInstance.scanFile(file, true);
+          if (scannerOnScan) {
+            try { scannerOnScan(decodedText); } catch {}
+          }
+          closeScanner();
+        } catch (err) {
+          setMessage(scannerMsg, 'Could not scan image: ' + (err?.message || err), 'error');
+        }
+      });
+    }
+
+    // Camera selector apply
+    const cameraApplyBtn = document.getElementById('cameraApplyBtn');
+    const cameraSelect = document.getElementById('cameraSelect');
+    if (cameraApplyBtn && cameraSelect) {
+      cameraApplyBtn.addEventListener('click', () => {
+        const selectedId = cameraSelect.value;
+        if (selectedId) startCamera(selectedId);
+      });
+    }
+
+    setupReceive();
+    setupStore();
+    renderEventLog();
+  }
+
+  document.addEventListener('DOMContentLoaded', bootstrap);
+})();
