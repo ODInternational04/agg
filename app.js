@@ -42,7 +42,27 @@
   
   async function signUp(email, password, fullName) {
     try {
-      // Sign up with Supabase Auth
+      // First, check if admin record already exists
+      const { data: existingAdmin, error: checkError } = await supabase
+        .from('admins')
+        .select('id, email, full_name, status')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('Error checking existing admin:', checkError);
+      }
+
+      if (existingAdmin) {
+        // User already exists in admins table
+        return { 
+          success: false, 
+          error: 'This email is already registered. Please use the login form to access your account.',
+          accountExists: true 
+        };
+      }
+
+      // Try to sign up with Supabase Auth
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email,
         password,
@@ -53,13 +73,27 @@
         }
       });
 
-      if (authError) throw authError;
+      if (authError) {
+        // Check if user already exists in auth
+        if (authError.message.includes('already registered') || 
+            authError.message.includes('User already registered')) {
+          return { 
+            success: false, 
+            error: 'This email is already registered. Please use the login form to access your account.',
+            accountExists: true 
+          };
+        }
+        throw authError;
+      }
+
+      // If user was created successfully or already exists in auth
+      const userId = authData.user.id;
 
       // Create admin record with depot_manager role
       const { error: adminError } = await supabase
         .from('admins')
         .insert([{
-          id: authData.user.id,
+          id: userId,
           email: email,
           full_name: fullName,
           role: 'depot_manager',
@@ -69,7 +103,17 @@
           updated_at: nowTs()
         }]);
 
-      if (adminError) throw adminError;
+      if (adminError) {
+        // Check if it's a duplicate key error (admin record already exists)
+        if (adminError.code === '23505') {
+          return { 
+            success: false, 
+            error: 'This email is already registered. Please use the login form to access your account.',
+            accountExists: true 
+          };
+        }
+        throw adminError;
+      }
 
       // Check if email confirmation is required
       const emailConfirmationRequired = !authData.session;
@@ -899,8 +943,19 @@
             signupBtn.disabled = false;
           }, 2500);
         } else {
-          setMessage(msgEl, result.error || 'Signup failed', 'error');
-          signupBtn.disabled = false;
+          // Check if account already exists
+          if (result.accountExists) {
+            setMessage(msgEl, result.error, 'error');
+            setTimeout(() => {
+              signupForm.classList.remove('active');
+              loginForm.classList.add('active');
+              document.getElementById('loginEmail').value = email;
+              signupBtn.disabled = false;
+            }, 2500);
+          } else {
+            setMessage(msgEl, result.error || 'Signup failed', 'error');
+            signupBtn.disabled = false;
+          }
         }
       });
     }
