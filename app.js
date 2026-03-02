@@ -95,10 +95,10 @@
       if (error) {
         // Provide more helpful error messages
         if (error.message.includes('Email not confirmed')) {
-          throw new Error('Please verify your email before logging in. Check your inbox for the verification link.');
+          throw new Error('Please verify your email before logging in. Check your inbox (including spam/junk folder) for the verification link from Supabase.');
         }
         if (error.message.includes('Invalid login credentials')) {
-          throw new Error('Invalid email or password.');
+          throw new Error('Invalid email or password. If you just signed up, please verify your email first.');
         }
         throw error;
       }
@@ -888,7 +888,7 @@
         
         if (result.success) {
           if (result.emailConfirmationRequired) {
-            setMessage(msgEl, 'Account created! Please check your email for verification link, then login.', 'success');
+            setMessage(msgEl, 'Account created! Check your email (and spam folder) for the verification link, then login.', 'success');
           } else {
             setMessage(msgEl, 'Account created successfully! You can now login.', 'success');
           }
