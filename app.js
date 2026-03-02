@@ -1,12 +1,15 @@
 // Depot Workflow App - Supabase Version
-// Connected to high_aggregator_* tables
+// Connected to high_aggregator_* tables with Authentication
 
 (function() {
   // Initialize Supabase client
   let supabase = null;
   
+  // Current authenticated user
+  let currentUser = null;
+  let currentAdmin = null;
+  
   // Constants
-  const USER = { id: 'USER-DEPOT-MANAGER-001', name: 'Depot Manager' };
   const DEPOT = { id: 'DEPOT-A', name: 'Depot A' };
 
   const STATUSES = {
@@ -33,6 +36,190 @@
     supabase = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey);
     console.log('✅ Supabase initialized');
     return true;
+  }
+
+  // ----- Authentication Functions -----
+  
+  async function signUp(email, password, fullName) {
+    try {
+      // Sign up with Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName
+          }
+        }
+      });
+
+      if (authError) throw authError;
+
+      // Create admin record with depot_manager role
+      const { error: adminError } = await supabase
+        .from('admins')
+        .insert([{
+          id: authData.user.id,
+          email: email,
+          full_name: fullName,
+          role: 'depot_manager',
+          permissions: ['receive_bins', 'store_bins', 'view_reports'],
+          status: 'active',
+          created_at: nowTs(),
+          updated_at: nowTs()
+        }]);
+
+      if (adminError) throw adminError;
+
+      // Check if email confirmation is required
+      const emailConfirmationRequired = !authData.session;
+      
+      return { 
+        success: true, 
+        user: authData.user, 
+        emailConfirmationRequired 
+      };
+    } catch (error) {
+      console.error('Signup error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async function login(email, password) {
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+
+      if (error) {
+        // Provide more helpful error messages
+        if (error.message.includes('Email not confirmed')) {
+          throw new Error('Please verify your email before logging in. Check your inbox for the verification link.');
+        }
+        if (error.message.includes('Invalid login credentials')) {
+          throw new Error('Invalid email or password.');
+        }
+        throw error;
+      }
+
+      // Get admin record
+      const adminData = await getAdminRecord(data.user.id);
+      
+      if (!adminData) {
+        await supabase.auth.signOut();
+        throw new Error('Admin record not found. Please contact administrator.');
+      }
+
+      if (adminData.status !== 'active') {
+        await supabase.auth.signOut();
+        throw new Error('Account is not active. Please contact administrator.');
+      }
+
+      if (adminData.role !== 'depot_manager' && adminData.role !== 'super_admin') {
+        await supabase.auth.signOut();
+        throw new Error('Access denied. Depot manager role required.');
+      }
+
+      // Update last_login
+      await updateLastLogin(data.user.id);
+
+      currentUser = data.user;
+      currentAdmin = adminData;
+
+      return { success: true, user: data.user, admin: adminData };
+    } catch (error) {
+      console.error('Login error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async function logout() {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      
+      currentUser = null;
+      currentAdmin = null;
+      showAuthScreen();
+      
+      return { success: true };
+    } catch (error) {
+      console.error('Logout error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async function getAdminRecord(userId) {
+    try {
+      const { data, error } = await supabase
+        .from('admins')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (error && error.code !== 'PGRST116') throw error;
+      return data;
+    } catch (error) {
+      console.error('Error fetching admin record:', error);
+      return null;
+    }
+  }
+
+  async function updateLastLogin(userId) {
+    try {
+      const { error } = await supabase
+        .from('admins')
+        .update({ last_login: nowTs(), updated_at: nowTs() })
+        .eq('id', userId);
+
+      if (error) throw error;
+    } catch (error) {
+      console.error('Error updating last login:', error);
+    }
+  }
+
+  async function checkSession() {
+    try {
+      const { data: { session }, error } = await supabase.auth.getSession();
+      
+      if (error) throw error;
+      
+      if (session && session.user) {
+        const adminData = await getAdminRecord(session.user.id);
+        
+        if (adminData && adminData.status === 'active' && 
+            (adminData.role === 'depot_manager' || adminData.role === 'super_admin')) {
+          currentUser = session.user;
+          currentAdmin = adminData;
+          showMainApp();
+          return true;
+        }
+      }
+      
+      showAuthScreen();
+      return false;
+    } catch (error) {
+      console.error('Session check error:', error);
+      showAuthScreen();
+      return false;
+    }
+  }
+
+  function showAuthScreen() {
+    document.getElementById('authScreen').style.display = 'flex';
+    document.getElementById('mainApp').style.display = 'none';
+  }
+
+  function showMainApp() {
+    document.getElementById('authScreen').style.display = 'none';
+    document.getElementById('mainApp').style.display = 'block';
+    
+    // Update user display
+    const userDisplay = document.getElementById('userDisplay');
+    if (userDisplay && currentAdmin) {
+      userDisplay.textContent = `${currentAdmin.full_name} (${currentAdmin.role})`;
+    }
   }
 
   // Helper functions
@@ -360,7 +547,7 @@
           bin_id: resolvedBin.id,
           depot_id: DEPOT.id,
           aggregator_id: resolvedBin.aggregator_id,
-          user_id: USER.id,
+          user_id: currentUser?.id || 'unknown',
           inbound_litres: litresEl && litresEl.value ? Number(litresEl.value) : null,
           oil_type: oilTypeEl && oilTypeEl.value ? oilTypeEl.value : null,
           notes: notesEl && (notesEl.value || '').trim() ? (notesEl.value || '').trim() : null,
@@ -510,7 +697,7 @@
             depot_id: DEPOT.id,
             aggregator_id: bin.aggregator_id,
             location_id: locationQR,
-            user_id: USER.id,
+            user_id: currentUser?.id || 'unknown',
             drainage_litres: drainageLitres,
             inbound_litres: inboundLitres ? Number(inboundLitres) : null,
             oil_type: oilType || null
@@ -617,6 +804,116 @@
 
     setupReceive();
     setupStore();
+    setupAuth();
+  }
+
+  // ----- Authentication UI Setup -----
+  function setupAuth() {
+    const loginForm = document.getElementById('loginForm');
+    const signupForm = document.getElementById('signupForm');
+    const showSignupLink = document.getElementById('showSignup');
+    const showLoginLink = document.getElementById('showLogin');
+    const loginBtn = document.getElementById('loginBtn');
+    const signupBtn = document.getElementById('signupBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+
+    // Toggle between login and signup forms
+    if (showSignupLink) {
+      showSignupLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        loginForm.classList.remove('active');
+        signupForm.classList.add('active');
+      });
+    }
+
+    if (showLoginLink) {
+      showLoginLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        signupForm.classList.remove('active');
+        loginForm.classList.add('active');
+      });
+    }
+
+    // Login handler
+    if (loginBtn) {
+      loginBtn.addEventListener('click', async () => {
+        const email = document.getElementById('loginEmail')?.value?.trim();
+        const password = document.getElementById('loginPassword')?.value;
+        const msgEl = document.getElementById('loginMessage');
+
+        if (!email || !password) {
+          setMessage(msgEl, 'Please fill in all fields', 'error');
+          return;
+        }
+
+        setMessage(msgEl, 'Logging in...', '');
+        loginBtn.disabled = true;
+
+        const result = await login(email, password);
+        
+        if (result.success) {
+          setMessage(msgEl, 'Login successful!', 'success');
+          setTimeout(() => {
+            showMainApp();
+          }, 500);
+        } else {
+          setMessage(msgEl, result.error || 'Login failed', 'error');
+          loginBtn.disabled = false;
+        }
+      });
+    }
+
+    // Signup handler
+    if (signupBtn) {
+      signupBtn.addEventListener('click', async () => {
+        const name = document.getElementById('signupName')?.value?.trim();
+        const email = document.getElementById('signupEmail')?.value?.trim();
+        const password = document.getElementById('signupPassword')?.value;
+        const msgEl = document.getElementById('signupMessage');
+
+        if (!name || !email || !password) {
+          setMessage(msgEl, 'Please fill in all fields', 'error');
+          return;
+        }
+
+        if (password.length < 6) {
+          setMessage(msgEl, 'Password must be at least 6 characters', 'error');
+          return;
+        }
+
+        setMessage(msgEl, 'Creating account...', '');
+        signupBtn.disabled = true;
+
+        const result = await signUp(email, password, name);
+        
+        if (result.success) {
+          if (result.emailConfirmationRequired) {
+            setMessage(msgEl, 'Account created! Please check your email for verification link, then login.', 'success');
+          } else {
+            setMessage(msgEl, 'Account created successfully! You can now login.', 'success');
+          }
+          setTimeout(() => {
+            signupForm.classList.remove('active');
+            loginForm.classList.add('active');
+            document.getElementById('loginEmail').value = email;
+            signupBtn.disabled = false;
+          }, 2500);
+        } else {
+          setMessage(msgEl, result.error || 'Signup failed', 'error');
+          signupBtn.disabled = false;
+        }
+      });
+    }
+
+    // Logout handler
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', async () => {
+        await logout();
+      });
+    }
+
+    // Check for existing session
+    checkSession();
   }
 
   document.addEventListener('DOMContentLoaded', bootstrap);
