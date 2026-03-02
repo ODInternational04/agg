@@ -42,11 +42,11 @@
   
   async function signUp(email, password, fullName) {
     try {
-      // First, check if admin record already exists
+      // First, check if admin record already exists (case-insensitive)
       const { data: existingAdmin, error: checkError } = await supabase
         .from('admins')
         .select('id, email, full_name, status')
-        .eq('email', email)
+        .ilike('email', email)
         .maybeSingle();
 
       if (checkError && checkError.code !== 'PGRST116') {
