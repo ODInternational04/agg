@@ -42,7 +42,28 @@
   
   async function signUp(email, password, fullName) {
     try {
-      // First, check if admin record already exists (case-insensitive)
+      // First, check if user already has an aggregator role
+      const { data: existingRole, error: roleCheckError } = await supabase
+        .from('user_roles')
+        .select('id, status')
+        .eq('email', email.toLowerCase())
+        .eq('platform', 'aggregator')
+        .maybeSingle();
+
+      if (roleCheckError && roleCheckError.code !== 'PGRST116') {
+        console.error('Error checking existing role:', roleCheckError);
+      }
+
+      if (existingRole) {
+        // User already has an aggregator role
+        return { 
+          success: false, 
+          error: 'This email is already registered for the aggregator platform. Please use the login form.',
+          accountExists: true 
+        };
+      }
+
+      // Check if admin record already exists (case-insensitive)
       const { data: existingAdmin, error: checkError } = await supabase
         .from('admins')
         .select('id, email, full_name, status')
@@ -68,7 +89,8 @@
         password,
         options: {
           data: {
-            full_name: fullName
+            full_name: fullName,
+            platform: 'aggregator'
           }
         }
       });
@@ -115,6 +137,24 @@
         throw adminError;
       }
 
+      // Create user role for aggregator platform
+      const { error: roleError } = await supabase
+        .from('user_roles')
+        .insert([{
+          user_id: userId,
+          email: email.toLowerCase(),
+          platform: 'aggregator',
+          platform_role: 'depot_manager',
+          status: 'active',
+          created_at: nowTs(),
+          updated_at: nowTs()
+        }]);
+
+      if (roleError) {
+        console.error('Error creating user role:', roleError);
+        // Continue anyway - role can be added later
+      }
+
       // Check if email confirmation is required
       const emailConfirmationRequired = !authData.session;
       
@@ -145,6 +185,31 @@
           throw new Error('Invalid email or password. If you just signed up, please verify your email first.');
         }
         throw error;
+      }
+
+      // ROLE-BASED ACCESS CONTROL: Check if user has aggregator platform access
+      const { data: userRole, error: roleError } = await supabase
+        .from('user_roles')
+        .select('platform, platform_role, status')
+        .eq('user_id', data.user.id)
+        .eq('platform', 'aggregator')
+        .maybeSingle();
+
+      if (roleError && roleError.code !== 'PGRST116') {
+        console.error('Error checking user role:', roleError);
+      }
+
+      if (!userRole) {
+        await supabase.auth.signOut();
+        throw new Error('Access denied. You do not have permission to access the Aggregator platform. Please register for an aggregator account or contact support.');
+      }
+
+      if (userRole.status !== 'active') {
+        await supabase.auth.signOut();
+        const statusMessage = userRole.status === 'pending' 
+          ? 'Your aggregator account is pending approval. Please wait for activation.' 
+          : `Your aggregator account is ${userRole.status}. Please contact administrator.`;
+        throw new Error(statusMessage);
       }
 
       // Get admin record
@@ -505,6 +570,7 @@
     const receiveBinQr = document.getElementById('receiveBinQr');
     const receiveOpenScannerBtn = document.getElementById('receiveOpenScannerBtn');
     const receiveBinInfo = document.getElementById('receiveBinInfo');
+    const companyNameEl = document.getElementById('receiveCompanyName');
     const litresEl = document.getElementById('receiveLitres');
     const oilTypeEl = document.getElementById('receiveOilType');
     const notesEl = document.getElementById('receiveNotes');
@@ -592,6 +658,7 @@
           depot_id: DEPOT.id,
           aggregator_id: resolvedBin.aggregator_id,
           user_id: currentUser?.id || 'unknown',
+          company_name: companyNameEl && (companyNameEl.value || '').trim() ? (companyNameEl.value || '').trim() : null,
           inbound_litres: litresEl && litresEl.value ? Number(litresEl.value) : null,
           oil_type: oilTypeEl && oilTypeEl.value ? oilTypeEl.value : null,
           notes: notesEl && (notesEl.value || '').trim() ? (notesEl.value || '').trim() : null,
